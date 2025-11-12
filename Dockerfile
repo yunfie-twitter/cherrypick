@@ -1,21 +1,27 @@
 # syntax = docker/dockerfile:1.4
 
+# -----------------------------
+# ビルド用の Node バージョン指定
+# -----------------------------
 ARG NODE_VERSION=24.10.0-bookworm
+ARG NODE_ENV=production
 
-# build assets & compile TypeScript
-
+# -----------------------------
+# ネイティブビルドステージ
+# -----------------------------
 FROM --platform=$BUILDPLATFORM node:${NODE_VERSION} AS native-builder
 
+# apt キャッシュ利用
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-	--mount=type=cache,target=/var/lib/apt,sharing=locked \
-	rm -f /etc/apt/apt.conf.d/docker-clean \
-	; echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache \
-	&& apt-get update \
-	&& apt-get install -yqq --no-install-recommends \
-	build-essential
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache \
+    && apt-get update \
+    && apt-get install -yqq --no-install-recommends build-essential
 
 WORKDIR /cherrypick
 
+# パッケージ定義ファイルを先にコピー
 COPY --link ["pnpm-lock.yaml", "pnpm-workspace.yaml", "package.json", "./"]
 COPY --link ["scripts", "./scripts"]
 COPY --link ["patches", "./patches"]
@@ -30,26 +36,28 @@ COPY --link ["packages/cherrypick-js/package.json", "./packages/cherrypick-js/"]
 COPY --link ["packages/misskey-reversi/package.json", "./packages/misskey-reversi/"]
 COPY --link ["packages/misskey-bubble-game/package.json", "./packages/misskey-bubble-game/"]
 
-ARG NODE_ENV=production
-
+# pnpm インストール
 RUN node -e "console.log(JSON.parse(require('node:fs').readFileSync('./package.json')).packageManager)" | xargs npm install -g
 
+# 依存パッケージインストール
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
-	pnpm i --frozen-lockfile --aggregate-output
+    pnpm i --frozen-lockfile --aggregate-output
 
+# プロジェクト全体をコピー
 COPY --link . ./
 
+# サブモジュール更新 & ビルド
 RUN git submodule update --init
 RUN pnpm build
 RUN rm -rf .git/
 
-# build native dependencies for target platform
-
+# -----------------------------
+# ターゲット用ビルドステージ
+# -----------------------------
 FROM --platform=$TARGETPLATFORM node:${NODE_VERSION} AS target-builder
 
 RUN apt-get update \
-	&& apt-get install -yqq --no-install-recommends \
-	build-essential
+    && apt-get install -yqq --no-install-recommends build-essential
 
 WORKDIR /cherrypick
 
@@ -61,36 +69,37 @@ COPY --link ["packages/cherrypick-js/package.json", "./packages/cherrypick-js/"]
 COPY --link ["packages/misskey-reversi/package.json", "./packages/misskey-reversi/"]
 COPY --link ["packages/misskey-bubble-game/package.json", "./packages/misskey-bubble-game/"]
 
-ARG NODE_ENV=production
-
 RUN node -e "console.log(JSON.parse(require('node:fs').readFileSync('./package.json')).packageManager)" | xargs npm install -g
 
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
-	pnpm i --frozen-lockfile --aggregate-output
+    pnpm i --frozen-lockfile --aggregate-output
 
+# -----------------------------
+# ランナー用ステージ
+# -----------------------------
 FROM --platform=$TARGETPLATFORM node:${NODE_VERSION}-slim AS runner
 
 ARG UID="991"
 ARG GID="991"
 
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends \
-	ffmpeg tini curl libjemalloc-dev libjemalloc2 \
-	&& ln -s /usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2 /usr/local/lib/libjemalloc.so \
-	&& groupadd -g "${GID}" cherrypick \
-	&& useradd -l -u "${UID}" -g "${GID}" -m -d /cherrypick cherrypick \
-	&& find / -type d -path /sys -prune -o -type d -path /proc -prune -o -type f -perm /u+s -ignore_readdir_race -exec chmod u-s {} \; \
-	&& find / -type d -path /sys -prune -o -type d -path /proc -prune -o -type f -perm /g+s -ignore_readdir_race -exec chmod g-s {} \; \
-	&& apt-get clean \
-	&& rm -rf /var/lib/apt/lists
+    && apt-get install -y --no-install-recommends ffmpeg tini curl libjemalloc-dev libjemalloc2 \
+    && ln -s /usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2 /usr/local/lib/libjemalloc.so \
+    && groupadd -g "${GID}" cherrypick \
+    && useradd -l -u "${UID}" -g "${GID}" -m -d /cherrypick cherrypick \
+    && find / -type d -path /sys -prune -o -type d -path /proc -prune -o -type f -perm /u+s -ignore_readdir_race -exec chmod u-s {} \; \
+    && find / -type d -path /sys -prune -o -type d -path /proc -prune -o -type f -perm /g+s -ignore_readdir_race -exec chmod g-s {} \; \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# add package.json to add pnpm
+# package.json を追加して pnpm を利用
 COPY ./package.json ./package.json
 RUN node -e "console.log(JSON.parse(require('node:fs').readFileSync('./package.json')).packageManager)" | xargs npm install -g
 
 USER cherrypick
 WORKDIR /cherrypick
 
+# node_modules とビルド成果物をコピー
 COPY --chown=cherrypick:cherrypick --from=target-builder /cherrypick/node_modules ./node_modules
 COPY --chown=cherrypick:cherrypick --from=target-builder /cherrypick/packages/backend/node_modules ./packages/backend/node_modules
 COPY --chown=cherrypick:cherrypick --from=target-builder /cherrypick/packages/cherrypick-js/node_modules ./packages/cherrypick-js/node_modules
@@ -104,9 +113,20 @@ COPY --chown=cherrypick:cherrypick --from=native-builder /cherrypick/packages/ba
 COPY --chown=cherrypick:cherrypick --from=native-builder /cherrypick/fluent-emojis /cherrypick/fluent-emojis
 COPY --chown=cherrypick:cherrypick . ./
 
+# root 権限でコピーして実行権限付与
+COPY --chown=cherrypick:cherrypick --chmod=755 wait-for-postgres.sh /wait-for-postgres.sh
+USER root
+RUN mkdir -p /var/lib/apt/lists/partial \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends netcat-openbsd bash \
+    && rm -rf /var/lib/apt/lists/*
+USER cherrypick
+
+# 環境変数
 ENV LD_PRELOAD=/usr/local/lib/libjemalloc.so
 ENV MALLOC_CONF=background_thread:true,metadata_thp:auto,dirty_decay_ms:30000,muzzy_decay_ms:30000
 ENV NODE_ENV=production
+
 HEALTHCHECK --interval=5s --retries=20 CMD ["/bin/bash", "/cherrypick/healthcheck.sh"]
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["pnpm", "run", "migrateandstart"]
+CMD ["/wait-for-postgres.sh", "db", "pnpm", "run", "migrateandstart"]
