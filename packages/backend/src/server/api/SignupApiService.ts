@@ -130,8 +130,7 @@ export class SignupApiService {
 
 		let ticket: MiRegistrationTicket | null = null;
 
-		// テスト時はこの機構は障害となるため無効にする
-		if (process.env.NODE_ENV !== 'test' && this.meta.disableRegistration) {
+		if (this.meta.disableRegistration) {
 			if (invitationCode == null || typeof invitationCode !== 'string') {
 				reply.code(400);
 				return;
@@ -168,9 +167,29 @@ export class SignupApiService {
 				reply.code(400);
 				return;
 			}
+		} else if (invitationCode) {
+			ticket = await this.registrationTicketsRepository.findOneBy({
+				code: invitationCode,
+			});
+
+			if (ticket == null || ticket.usedById != null) {
+				reply.code(400);
+				return;
+			}
+
+			if (ticket.expiresAt && ticket.expiresAt < new Date()) {
+				reply.code(400);
+				return;
+			}
+
+			// メアド認証が有効の場合
+			if (this.meta.emailRequiredForSignup && !emailAddress) {
+				reply.code(400);
+				return;
+			}
 		}
 
-		if (this.meta.emailRequiredForSignup) {
+		if (this.meta.emailRequiredForSignup && !invitationCode) {
 			if (await this.usersRepository.exists({ where: { usernameLower: username.toLowerCase(), host: IsNull() } })) {
 				throw new FastifyReplyError(400, 'DUPLICATED_USERNAME');
 			}
